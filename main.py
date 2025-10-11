@@ -1,6 +1,6 @@
 import argparse
-import base64
 import sys
+import tempfile
 import webbrowser
 from datetime import datetime, timedelta
 
@@ -151,7 +151,9 @@ def build_dataframe(symbols, days):
                 "pct_change": float(pct),
             }
         )
-        print(f"[{idx}/{len(symbols)}] {sym}  pct={pct:+.2f}%  sector={sector}  mcap={marketCap}")
+        print(
+            f"[{idx}/{len(symbols)}] {sym}  pct={pct:+.2f}%  sector={sector}  mcap={marketCap}"
+        )
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -202,14 +204,26 @@ def make_treemap(df, period_label):
 
 def open_fig_in_browser(fig):
     html = fig.to_html(full_html=True, include_plotlyjs="cdn")
-    b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
-    data_uri = "data:text/html;base64," + b64
-    webbrowser.open(data_uri, new=2)
+    # write to a temp HTML file
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False, suffix=".html", mode="w", encoding="utf-8"
+    )
+    tmp.write(html)
+    tmp.flush()
+    tmp.close()
+    path = tmp.name
+    file_url = "file://" + path
+    webbrowser.open(file_url, new=2)
+    print("Opened local file:", path)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive treemap (sector -> ticker) using yfinance & plotly.")
-    parser.add_argument("symbols_file", help="Path to .txt file with symbols (one per line).")
+    parser = argparse.ArgumentParser(
+        description="Interactive treemap (sector -> ticker) using yfinance & plotly."
+    )
+    parser.add_argument(
+        "symbols_file", help="Path to .txt file with symbols (one per line)."
+    )
     parser.add_argument(
         "--period",
         "-p",
@@ -225,7 +239,9 @@ def main():
         sys.exit(1)
 
     days = PERIOD_DAYS[args.period]
-    print(f"Building treemap for {len(symbols)} symbols, period={args.period} ({days} days) ...")
+    print(
+        f"Building treemap for {len(symbols)} symbols, period={args.period} ({days} days) ..."
+    )
 
     df = build_dataframe(symbols, days)
     fig = make_treemap(df, args.period)
