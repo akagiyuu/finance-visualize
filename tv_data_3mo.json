@@ -1,0 +1,162 @@
+{
+  "meta": {
+    "dataSource": "CAFEEF_HISTORY",
+    "range": "3mo",
+    "generated_at": "2025-10-11T01:45:29Z",
+    "notes": "Blocks are uniform size; color = % change"
+  },
+  "sectors": [
+    {
+      "name": "Technology",
+      "sector_market_cap": null,
+      "items": [
+        {
+          "symbol": "CRV",
+          "name": "CRV",
+          "sector": "Technology",
+          "price": 31.2,
+          "change": 0.0,
+          "change_pct": 0.0,
+          "market_cap_basic": null,
+          "volume": null,
+          "n_points": 1
+        },
+        {
+          "symbol": "VAF",
+          "name": "VAF",
+          "sector": "Technology",
+          "price": 17.6,
+          "change": -3.1499999999999986,
+          "change_pct": -15.180722891566258,
+          "market_cap_basic": null,
+          "volume": null,
+          "n_points": 90
+        },
+        {
+          "symbol": "HSL",
+          "name": "HSL",
+          "sector": "Technology",
+          "price": 9.46,
+          "change": 4.720000000000001,
+          "change_pct": 99.57805907172997,
+          "market_cap_basic": null,
+          "volume": null,
+          "n_points": 90
+        },
+        {
+          "symbol": "SBT",
+          "name": "SBT",
+          "sector": "Technology",
+          "price": 26.75,
+          "change": 8.25,
+          "change_pct": 44.5945945945946,
+          "market_cap_basic": null,
+          "volume": null,
+          "n_points": 90
+        }
+      ]
+    },
+    {
+      "name": "Food",
+      "sector_market_cap": null,
+      "items": [
+        {
+          "symbol": "GEE",
+          "name": "GEE",
+          "sector": "Food",
+          "price": 143.8,
+          "change": 47.30000000000001,
+          "change_pct": 49.01554404145079,
+          "market_cap_basic": null,
+          "volume": null,
+          "n_points": 90
+        }
+      ]
+    },
+    {
+      "name": "Fodd",
+      "sector_market_cap": null,
+      "items": [
+        {
+          "symbol": "TEG",
+          "name": "Gee",
+          "sector": "Fodd",
+          "price": 6.9,
+          "change": 1.2300000000000004,
+          "change_pct": 21.6931216931217,
+          "market_cap_basic": null,
+          "volume": null,
+          "n_points": 90
+        }
+      ]
+    }
+  ],
+  "flat": [
+    {
+      "symbol": "CRV",
+      "name": "CRV",
+      "sector": "Technology",
+      "price": 31.2,
+      "change": 0.0,
+      "change_pct": 0.0,
+      "market_cap_basic": null,
+      "volume": null,
+      "n_points": 1
+    },
+    {
+      "symbol": "GEE",
+      "name": "GEE",
+      "sector": "Food",
+      "price": 143.8,
+      "change": 47.30000000000001,
+      "change_pct": 49.01554404145079,
+      "market_cap_basic": null,
+      "volume": null,
+      "n_points": 90
+    },
+    {
+      "symbol": "VAF",
+      "name": "VAF",
+      "sector": "Technology",
+      "price": 17.6,
+      "change": -3.1499999999999986,
+      "change_pct": -15.180722891566258,
+      "market_cap_basic": null,
+      "volume": null,
+      "n_points": 90
+    },
+    {
+      "symbol": "HSL",
+      "name": "HSL",
+      "sector": "Technology",
+      "price": 9.46,
+      "change": 4.720000000000001,
+      "change_pct": 99.57805907172997,
+      "market_cap_basic": null,
+      "volume": null,
+      "n_points": 90
+    },
+    {
+      "symbol": "SBT",
+      "name": "SBT",
+      "sector": "Technology",
+      "price": 26.75,
+      "change": 8.25,
+      "change_pct": 44.5945945945946,
+      "market_cap_basic": null,
+      "volume": null,
+      "n_points": 90
+    },
+    {
+      "symbol": "TEG",
+      "name": "Gee",
+      "sector": "Fodd",
+      "price": 6.9,
+      "change": 1.2300000000000004,
+      "change_pct": 21.6931216931217,
+      "market_cap_basic": null,
+      "volume": null,
+      "n_points": 90
+    }
+  ]
+}
