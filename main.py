@@ -1,257 +1,236 @@
 import argparse
-import json
-import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from typing import Dict, List
+import base64
+import sys
+import webbrowser
+from datetime import datetime, timedelta
 
 import pandas as pd
-import requests
-from tqdm import tqdm
-import plotly.graph_objects as go
 import plotly.express as px
+import yfinance as yf
 
-SYMBOLS_FILE = "symbols.txt"
-SECTORS_FILE = "sectors.csv"
-MARKETCAPS_FILE = "marketcaps.csv"
-DEFAULT_WORKERS = 8
-HTTP_TIMEOUT = 10
-
-RANGE_TO_DAYS = {"week": 7, "month": 30, "3mo": 90, "6mo": 180, "year": 365}
-
-
-def fetch_history(symbol: str, count: int, timeout=HTTP_TIMEOUT):
-    url = f"https://cafef.vn/du-lieu/Ajax/PageNew/DataHistory/PriceHistory.ashx?Symbol={symbol}&PageIndex=1&PageSize={count}"
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()["Data"]["Data"]
+# Use days for robust start-date calculation (bulk download)
+PERIOD_DAYS = {
+    "1w": 7,
+    "1m": 30,
+    "3m": 90,
+    "6m": 182,
+    "1y": 365,
+}
 
 
-def normalize_df(raw):
-    df = pd.DataFrame(raw)
-    df.columns = [c.lower() for c in df.columns]
+def read_symbols(path):
+    """Read symbols file. Keep .VN suffix if present; otherwise append .VN as you had before."""
+    with open(path, "r", encoding="utf-8") as f:
+        syms = []
+        for raw in f:
+            s = raw.strip()
+            if not s:
+                continue
+            # keep uppercase, avoid double suffix
+            s = s.upper()
+            if not s.endswith(".VN"):
+                s = f"{s}.VN"
+            syms.append(s)
+    # dedupe while preserving order
+    return list(dict.fromkeys(syms))
 
-    df = df.rename(
-        columns={
-            "ngay": "date",
-            "giamocua": "open",
-            "giadongcua": "close",
-            "giacaonhat": "high",
-            "giathapnhat": "low",
-        }
+
+def bulk_download_closes(symbols, start_date, end_date):
+    """
+    Download adjusted close prices for all symbols in a single call.
+    Returns a dict: symbol -> pd.Series of adjusted closes (datetime indexed).
+    """
+    if not symbols:
+        return {}
+
+    # yf.download with multiple tickers returns columns as MultiIndex (ticker, field)
+    # Use auto_adjust True to get adjusted prices
+    df = yf.download(
+        tickers=" ".join(symbols),
+        start=start_date.strftime("%Y-%m-%d"),
+        end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+        interval="1d",
+        auto_adjust=True,
+        threads=True,
+        progress=False,
     )
 
-    df["date"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+    closes = {}
+    # detect format: multiindex columns when multiple tickers, single-level when one ticker
+    if isinstance(df.columns, pd.MultiIndex):
+        # df[ (ticker, 'Close') ] is series for that ticker
+        for ticker in symbols:
+            try:
+                series = df[(ticker, "Close")].dropna()
+            except Exception:
+                # fallback: maybe ticker not present
+                series = pd.Series(dtype=float)
+            closes[ticker] = series
+    else:
+        # single ticker case: df['Close'] present
+        # map the only symbol to that column
+        ticker = symbols[0]
+        if "Close" in df.columns:
+            closes[ticker] = df["Close"].dropna()
+        else:
+            closes[ticker] = pd.Series(dtype=float)
 
-    for c in ("open", "high", "low", "close"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return closes
 
-    vol_cols = [c for c in df.columns if c.lower() in ("kl", "volume", "vol", "khoiluong", "khoi_luong")]
-    if vol_cols:
-        df["volume"] = pd.to_numeric(df[vol_cols[0]], errors="coerce")
 
-    df = df.dropna(subset=["date"])
-    if "close" in df.columns:
-        df = df.dropna(subset=["close"])
-    df = df.sort_values("date").set_index("date")
+def fetch_metadata(symbol):
+    """
+    Fetch sector and marketCap via yfinance Ticker.info (best-effort).
+    Return (sector, marketCap).
+    """
+    try:
+        t = yf.Ticker(symbol)
+        info = t.get_info() if hasattr(t, "get_info") else t.info
+        if info:
+            sector = info.get("sector") or info.get("industry") or "Unknown"
+            marketCap = info.get("marketCap") or info.get("market_cap") or 0
+            # ensure numeric
+            if marketCap is None:
+                marketCap = 0
+            return sector, marketCap
+    except Exception:
+        pass
+    return "Unknown", 0
+
+
+def build_dataframe(symbols, days):
+    """
+    1) bulk download closes from start_date -> today
+    2) compute pct_change per ticker using first available within window -> last available
+    3) fetch per-ticker metadata (sector, marketCap)
+    """
+    end_date = datetime.utcnow().date()
+    start_date = end_date - timedelta(days=days)
+
+    print(f"Bulk downloading price data from {start_date} to {end_date} ...")
+    closes = bulk_download_closes(symbols, start_date, end_date)
+
+    rows = []
+    for idx, sym in enumerate(symbols, 1):
+        series = closes.get(sym, pd.Series(dtype=float))
+        # compute pct using first and last available closes in the window
+        pct = 0.0
+        if series is not None and len(series.dropna()) >= 2:
+            s = series.dropna()
+            first = float(s.iloc[0])
+            last = float(s.iloc[-1])
+            if first != 0:
+                pct = (last - first) / first * 100.0
+            else:
+                pct = 0.0
+        else:
+            # fallback: try to fetch a tiny history per-ticker (rare)
+            try:
+                t = yf.Ticker(sym)
+                hist = t.history(period="1mo", interval="1d", auto_adjust=True)
+                if hist is not None and hist.shape[0] >= 2:
+                    f = hist["Close"].iloc[0]
+                    l = hist["Close"].iloc[-1]
+                    pct = (l - f) / f * 100.0 if f != 0 else 0.0
+                else:
+                    pct = 0.0
+            except Exception:
+                pct = 0.0
+
+        sector, marketCap = fetch_metadata(sym)
+
+        # display symbol: strip .VN for compact labels
+        display = sym.split(".")[0] if sym.upper().endswith(".VN") else sym
+
+        rows.append(
+            {
+                "symbol": display,
+                "raw_symbol": sym,
+                "sector": sector or "Unknown",
+                "marketCap": float(marketCap or 0),
+                "pct_change": float(pct),
+            }
+        )
+        print(f"[{idx}/{len(symbols)}] {sym}  pct={pct:+.2f}%  sector={sector}  mcap={marketCap}")
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("No data fetched for any symbol.")
+
+    # Replace zero or missing marketCap with a small positive number so treemap sizes behave
+    df["marketCap"] = df["marketCap"].fillna(0.0)
+    positive_mcaps = df.loc[df["marketCap"] > 0, "marketCap"]
+    min_positive = positive_mcaps.min() if not positive_mcaps.empty else 1.0
+    df.loc[df["marketCap"] <= 0, "marketCap"] = float(min_positive * 0.01)
+
     return df
 
 
-def read_symbols(path: str) -> List[str]:
-    with open(path, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
-    return [l.upper().replace(".", "-") for l in lines]
-
-
-def read_sector_file(path: str) -> Dict[str, Dict]:
-    df = pd.read_csv(path, dtype=str, header=0)
-    cols = [c.lower() for c in df.columns]
-    mapping = {}
-    if "symbol" in cols and "sector" in cols:
-        s_col = cols.index("symbol")
-        sec_col = cols.index("sector")
-        name_col = cols.index("name") if "name" in cols else None
-        for _, row in df.iterrows():
-            sym = str(row.iloc[s_col]).upper()
-            name = str(row.iloc[name_col]) if name_col is not None and pd.notna(row.iloc[name_col]) else sym
-            mapping[sym] = {"sector": str(row.iloc[sec_col]) if pd.notna(row.iloc[sec_col]) else "Unknown", "name": name}
-    else:
-        for _, row in df.iterrows():
-            sym = str(row.iloc[0]).upper()
-            sec = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else "Unknown"
-            name = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else sym
-            mapping[sym] = {"sector": sec, "name": name}
-    return mapping
-
-
-def read_marketcaps(path: str) -> Dict[str, float]:
-    df = pd.read_csv(path, dtype=str, header=0)
-    cols = [c.lower() for c in df.columns]
-    mapping = {}
-    if "symbol" in cols and ("market_cap" in cols or "marketcap" in cols or "market-cap" in cols):
-        s_col = cols.index("symbol")
-        mc_col = None
-        for candidate in ("market_cap", "marketcap", "market-cap"):
-            if candidate in cols:
-                mc_col = cols.index(candidate)
-                break
-        for _, row in df.iterrows():
-            sym = str(row.iloc[s_col]).upper()
-            try:
-                mapping[sym] = float(str(row.iloc[mc_col]).replace(",", "").strip())
-            except Exception:
-                mapping[sym] = None
-    else:
-        for _, row in df.iterrows():
-            sym = str(row.iloc[0]).upper()
-            try:
-                mapping[sym] = float(str(row.iloc[1]).replace(",", "").strip())
-            except Exception:
-                mapping[sym] = None
-    return mapping
-
-
-def process_symbol(symbol: str, days: int, timeout=HTTP_TIMEOUT) -> Dict:
-    try:
-        raw = fetch_history(symbol, count=days, timeout=timeout)
-        df = normalize_df(raw)
-        if df.empty or "close" not in df.columns:
-            return {"symbol": symbol, "price": None, "change": None, "change_pct": None, "avg_volume": None, "n_points": 0}
-        first = float(df["close"].iloc[0])
-        last = float(df["close"].iloc[-1])
-        change = last - first
-        change_pct = (change / first * 100.0) if first != 0 else None
-        avg_vol = None
-        if "volume" in df.columns:
-            vol = df["volume"].dropna()
-            if not vol.empty:
-                avg_vol = float(vol.mean())
-        return {"symbol": symbol, "price": last, "change": change, "change_pct": change_pct, "avg_volume": avg_vol, "n_points": len(df)}
-    except Exception as e:
-        return {"symbol": symbol, "price": None, "change": None, "change_pct": None, "avg_volume": None, "n_points": 0, "error": str(e)}
-
-
-def build_tv_json_and_heatmap(items: List[Dict], sector_map: Dict[str, Dict], mc_map: Dict[str, float], range_name: str):
-    flat = []
-    for it in items:
-        sym = it["symbol"]
-        if it.get("change_pct") is None:
-            continue
-        name = sym
-        sector = "Unknown"
-        if sector_map and sym in sector_map:
-            name = sector_map[sym].get("name", sym)
-            sector = sector_map[sym].get("sector", "Unknown")
-        mc = None
-        if mc_map and sym in mc_map and mc_map[sym] is not None and not (isinstance(mc_map[sym], float) and math.isnan(mc_map[sym])):
-            mc = float(mc_map[sym])
-        else:
-            if it.get("avg_volume") and it.get("price"):
-                try:
-                    mc = float(it["avg_volume"]) * float(it["price"])
-                except Exception:
-                    mc = None
-            else:
-                mc = None
-
-        entry = {
-            "symbol": sym,
-            "name": name,
-            "sector": sector,
-            "price": None if it["price"] is None else float(it["price"]),
-            "change": None if it["change"] is None else float(it["change"]),
-            "change_pct": None if it["change_pct"] is None else float(it["change_pct"]),
-            "market_cap_basic": None if mc is None else float(mc),
-            "volume": None if it.get("avg_volume") is None else float(it["avg_volume"]),
-            "n_points": int(it.get("n_points", 0))
-        }
-        flat.append(entry)
-
-    sectors: Dict[str, Dict] = {}
-    for e in flat:
-        sec = e["sector"] or "Unknown"
-        sectors.setdefault(sec, {"name": sec, "sector_market_cap": 0.0, "items": []})
-        sectors[sec]["items"].append(e)
-        if e["market_cap_basic"] is not None:
-            sectors[sec]["sector_market_cap"] += e["market_cap_basic"]
-
-    sectors_list = []
-    for sec_name, sec_data in sectors.items():
-        smc = sec_data["sector_market_cap"] if sec_data["sector_market_cap"] > 0 else None
-        sectors_list.append({"name": sec_name, "sector_market_cap": smc, "items": sec_data["items"]})
-
-    meta = {
-        "dataSource": "CAFEEF_HISTORY",
-        "range": range_name,
-        "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "notes": "Blocks are uniform size; color = % change"
-    }
-
-    tv_json = {"meta": meta, "sectors": sectors_list, "flat": flat}
-
-    df = pd.DataFrame(flat)
-    if df.empty:
-        raise SystemExit("No valid items to plot (no data)")
-
-    df["size_uniform"] = 1
-
+def make_treemap(df, period_label):
+    # Add label for hover/leaf content (we'll show pct in hover)
+    df["label_pct"] = df["pct_change"].map(lambda v: f"{v:+.2f}%")
+    # Use custom_data explicitly to control hovertemplate indices
+    custom_cols = ["raw_symbol", "marketCap", "pct_change"]
     fig = px.treemap(
         df,
         path=["sector", "symbol"],
-        values="size_uniform",
-        color="change_pct",
-        hover_data={"name": True, "change_pct": True},
-        labels={"change_pct": "% change"},
+        values="marketCap",
+        color="pct_change",
         color_continuous_scale="RdYlGn",
         color_continuous_midpoint=0,
+        custom_data=custom_cols,
     )
-    fig.update_traces(hovertemplate="%{label}<br>%{customdata[1]:.2f}%")
-    fig.update_layout(margin=dict(t=50, l=25, r=25, b=25), title=f"Heatmap-style blocks (range={range_name})")
 
-    html_out = f"heatmap_{range_name}.html"
-    json_out = f"tv_data_{range_name}.json"
-    fig.write_html(html_out)
-    with open(json_out, "w", encoding="utf-8") as f:
-        json.dump(tv_json, f, ensure_ascii=False, indent=2)
+    # Show only symbol text inside boxes (keeps layout readable). Percent shown in hover.
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{label}</b><br>"
+            "raw: %{customdata[0]}<br>"
+            "Market cap: %{customdata[1]:,.0f}<br>"
+            "Change: %{customdata[2]:+.2f}%<extra></extra>"
+        ),
+        textinfo="label",
+    )
 
-    print("Wrote HTML:", html_out)
-    print("Wrote JSON:", json_out)
+    fig.update_layout(
+        title=f"Interactive Market Treemap — period: {period_label}",
+        margin=dict(t=50, l=25, r=25, b=25),
+        coloraxis_colorbar=dict(title="% change"),
+    )
+    return fig
+
+
+def open_fig_in_browser(fig):
+    html = fig.to_html(full_html=True, include_plotlyjs="cdn")
+    b64 = base64.b64encode(html.encode("utf-8")).decode("ascii")
+    data_uri = "data:text/html;base64," + b64
+    webbrowser.open(data_uri, new=2)
 
 
 def main():
-    p = argparse.ArgumentParser(description="Heatmap-style blocks from cafef — only change range.")
-    p.add_argument("--range", default="month", choices=list(RANGE_TO_DAYS.keys()), help="Range: week, month, 3mo, 6mo, year")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="Interactive treemap (sector -> ticker) using yfinance & plotly.")
+    parser.add_argument("symbols_file", help="Path to .txt file with symbols (one per line).")
+    parser.add_argument(
+        "--period",
+        "-p",
+        choices=list(PERIOD_DAYS.keys()),
+        default="1m",
+        help="Period: 1w,1m,3m,6m,1y (default 1m).",
+    )
+    args = parser.parse_args()
 
-    try:
-        symbols = read_symbols(SYMBOLS_FILE)
-    except FileNotFoundError:
-        raise SystemExit(f"Missing {SYMBOLS_FILE}")
+    symbols = read_symbols(args.symbols_file)
+    if not symbols:
+        print("No symbols found.", file=sys.stderr)
+        sys.exit(1)
 
-    sector_map = {}
-    try:
-        sector_map = read_sector_file(SECTORS_FILE)
-        print(f"Loaded sectors from {SECTORS_FILE}")
-    except FileNotFoundError:
-        print(f"No {SECTORS_FILE} — defaulting to Unknown sector")
+    days = PERIOD_DAYS[args.period]
+    print(f"Building treemap for {len(symbols)} symbols, period={args.period} ({days} days) ...")
 
-    mc_map = {}
-    try:
-        mc_map = read_marketcaps(MARKETCAPS_FILE)
-        print(f"Loaded market caps from {MARKETCAPS_FILE}")
-    except FileNotFoundError:
-        print(f"No {MARKETCAPS_FILE} — will estimate sizes")
-
-    days = RANGE_TO_DAYS[args.range]
-    results = []
-    with ThreadPoolExecutor(max_workers=DEFAULT_WORKERS) as ex:
-        futures = {ex.submit(process_symbol, sym, days, HTTP_TIMEOUT): sym for sym in symbols}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Fetching"):
-            res = fut.result()
-            results.append(res)
-
-    build_tv_json_and_heatmap(results, sector_map, mc_map, args.range)
+    df = build_dataframe(symbols, days)
+    fig = make_treemap(df, args.period)
+    print("Opening interactive treemap in your default browser...")
+    open_fig_in_browser(fig)
 
 
 if __name__ == "__main__":
